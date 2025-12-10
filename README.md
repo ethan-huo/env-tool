@@ -29,8 +29,8 @@ env ls -e prod
 # Get/Set/Remove
 env get API_KEY
 env get API_KEY -e all          # compare across envs
-env set API_KEY "value"
-env set API_KEY "value" --encrypt
+env set API_KEY "value"         # encrypted by default
+env set API_KEY "value" --plain # plain text
 env rm API_KEY
 
 # Compare
@@ -113,7 +113,7 @@ In CI, set `DOTENV_PRIVATE_KEY_DEVELOPMENT` and `DOTENV_PRIVATE_KEY_PRODUCTION` 
 | `env init` | Initialize project with config and env files |
 | `env ls` | List environment variables |
 | `env get <key>` | Get variable value |
-| `env set <key> <value>` | Set variable (plain text by default) |
+| `env set <key> <value>` | Set variable (encrypted by default) |
 | `env rm <key>` | Remove variable |
 | `env diff [target]` | Compare envs or dotenvx vs sync targets |
 | `env sync` | Run typegen and sync to configured targets |

@@ -8,19 +8,25 @@ export const setCommand = new Command('set')
   .argument('<key>', 'variable name')
   .argument('<value>', 'variable value')
   .option('-e, --env <env>', 'environment: dev | prod | all', 'dev')
-  .option('--encrypt', 'encrypt the value', false)
+  .option('--plain', 'write as plain text (no encryption)', false)
   .action(async (key: string, value: string, options) => {
     const config = await loadConfig()
     const env = options.env as 'dev' | 'prod' | 'all'
 
     const envs: Array<'dev' | 'prod'> = env === 'all' ? ['dev', 'prod'] : [env]
 
+    // Check for .env.keys
+    const keysExists = await Bun.file('.env.keys').exists()
+    if (!keysExists && !options.plain) {
+      console.log(c.warn('.env.keys not found - writing plain text value'))
+    }
+
     for (const e of envs) {
       const envPath = getEnvFilePath(config, e)
 
       try {
         const args = ['dotenvx', 'set', key, value, '-f', envPath]
-        if (!options.encrypt) {
+        if (options.plain || !keysExists) {
           args.push('--plain')
         }
 
