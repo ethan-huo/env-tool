@@ -12,6 +12,14 @@ CLI for managing environment variables with dotenvx encryption, type generation,
 ## Install
 
 ```bash
+bun add github:ethan-huo/env-tool
+```
+
+Or for development:
+
+```bash
+git clone https://github.com/ethan-huo/env-tool.git
+cd env-tool
 bun install
 bun link
 ```
