@@ -107,7 +107,7 @@ async function runSync(
 
     // Sync to Wrangler
     if (config.sync?.wrangler) {
-      const result = await syncToWrangler(envRecord, config.sync.wrangler, dryRun)
+      const result = await syncToWrangler(envRecord, env, config.sync.wrangler, dryRun)
 
       if (dryRun) {
         console.log(c.dim(`[dry-run] Wrangler:`))

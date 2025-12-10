@@ -1,77 +1,28 @@
+import { dirname, resolve } from 'node:path'
 import { Command } from 'commander'
-import { loadConfig, BUILTIN_EXCLUDE_PREFIXES } from '../config'
+import { loadConfig, type EnvType } from '../config'
 import { getEnvFilePath, loadEnvFile, shouldExclude } from '../utils/dotenv'
-
-type DiffEntry = {
-  key: string
-  left: string | null
-  right: string | null
-  status: 'added' | 'removed' | 'changed' | 'same'
-}
+import { getWranglerSecrets } from '../utils/sync-wrangler'
+import { c, printTable, type TableColumn, type TableRow } from '../utils/color'
 
 export const diffCommand = new Command('diff')
-  .description('Compare environment variables')
-  .argument('[target]', 'target: envs | convex | wrangler', 'envs')
+  .description('Compare environment variables with sync targets')
   .option('-e, --env <env>', 'environment: dev | prod', 'dev')
-  .option('--envs <pair>', 'compare two envs (e.g. dev:prod)')
-  .option('--tool <tool>', 'external diff tool: difft | delta')
-  .action(async (target: string, options) => {
+  .action(async (options) => {
     const config = await loadConfig()
+    const env = options.env as EnvType
 
-    // 对比两个环境
-    if (target === 'envs' || options.envs) {
-      const [leftEnv, rightEnv] = (options.envs || 'dev:prod').split(':') as ['dev' | 'prod', 'dev' | 'prod']
-      await diffEnvs(config, leftEnv, rightEnv, options.tool)
-      return
+    if (!config.sync?.convex && !config.sync?.wrangler) {
+      console.error('Error: no sync targets configured in env.config.ts')
+      process.exit(1)
     }
 
-    // 对比 dotenvx 和 convex/wrangler
-    if (target === 'convex') {
-      await diffConvex(config, options.env as 'dev' | 'prod', options.tool)
-      return
-    }
-
-    if (target === 'wrangler') {
-      console.log('TODO: implement wrangler diff')
-      return
-    }
-
-    console.error(`Unknown target: ${target}`)
-    process.exit(1)
+    await diffAll(config, env)
   })
 
-async function diffEnvs(
+async function diffAll(
   config: Awaited<ReturnType<typeof loadConfig>>,
-  leftEnv: 'dev' | 'prod',
-  rightEnv: 'dev' | 'prod',
-  tool?: string
-) {
-  const leftPath = getEnvFilePath(config, leftEnv)
-  const rightPath = getEnvFilePath(config, rightEnv)
-
-  let leftRecord: Record<string, string> = {}
-  let rightRecord: Record<string, string> = {}
-
-  try {
-    leftRecord = await loadEnvFile(leftPath)
-  } catch {
-    console.error(`Failed to load ${leftPath}`)
-  }
-
-  try {
-    rightRecord = await loadEnvFile(rightPath)
-  } catch {
-    console.error(`Failed to load ${rightPath}`)
-  }
-
-  const entries = computeDiff(leftRecord, rightRecord, [])
-  printDiff(entries, leftEnv, rightEnv, tool)
-}
-
-async function diffConvex(
-  config: Awaited<ReturnType<typeof loadConfig>>,
-  env: 'dev' | 'prod',
-  tool?: string
+  env: EnvType
 ) {
   const envPath = getEnvFilePath(config, env)
   let envRecord: Record<string, string> = {}
@@ -83,114 +34,174 @@ async function diffConvex(
     process.exit(1)
   }
 
-  // 获取 convex 环境变量
-  const convexRecord = await getConvexEnv(env)
+  // 收集所有数据源
+  const hasConvex = !!config.sync?.convex
+  const hasWrangler = !!config.sync?.wrangler
 
-  const excludePatterns = config.sync?.convex?.exclude ?? []
-  const entries = computeDiff(envRecord, convexRecord, excludePatterns)
-  printDiff(entries, 'dotenvx', 'convex', tool)
+  const convexRecord = hasConvex ? await getConvexEnv(env) : {}
+  const wranglerKeys = hasWrangler
+    ? await getWranglerSecretsForDiff(config, env)
+    : new Set<string>()
+
+  // 收集所有 keys
+  const allKeys = new Set([
+    ...Object.keys(envRecord),
+    ...Object.keys(convexRecord),
+    ...wranglerKeys,
+  ])
+
+  // 过滤排除的 keys
+  const excludePatterns = [
+    ...(config.sync?.convex?.exclude ?? []),
+    ...(config.sync?.wrangler?.exclude ?? []),
+  ]
+
+  // 构建表格数据
+  const envFileName = envPath.split('/').pop() ?? `.env.${env}`
+  const columns: TableColumn[] = [
+    { key: 'key', label: 'KEY' },
+    { key: 'env', label: envFileName, width: 20 },
+  ]
+
+  if (hasConvex) {
+    columns.push({ key: 'convex', label: 'convex', width: 20 })
+  }
+  if (hasWrangler) {
+    columns.push({ key: 'wrangler', label: 'wrangler', width: 10 })
+  }
+  columns.push({ key: 'synced', label: 'synced' })
+
+  const rows: TableRow[] = []
+
+  for (const key of [...allKeys].sort()) {
+    if (shouldExclude(key, excludePatterns)) continue
+
+    const envVal = envRecord[key]
+    const convexVal = hasConvex ? convexRecord[key] : undefined
+    const wranglerExists = hasWrangler ? wranglerKeys.has(key) : undefined
+
+    // 判断同步状态
+    const { synced, issues } = checkSyncStatus({
+      envVal,
+      convexVal,
+      wranglerExists,
+      hasConvex,
+      hasWrangler,
+    })
+
+    // 只显示有问题的行
+    if (synced) continue
+
+    const row: TableRow = {
+      key,
+      env: formatValue(envVal),
+    }
+
+    if (hasConvex) {
+      const convexMatches = envVal === convexVal
+      row.convex = convexMatches
+        ? formatValue(convexVal)
+        : c.yellow(formatValue(convexVal))
+    }
+
+    if (hasWrangler) {
+      const wranglerMatches = envVal !== undefined && wranglerExists
+      row.wrangler = wranglerExists
+        ? wranglerMatches
+          ? c.green('✓')
+          : c.yellow('✓')
+        : c.dim('─')
+    }
+
+    row.synced = c.red(`✗ ${issues.join(', ')}`)
+    rows.push(row)
+  }
+
+  if (rows.length === 0) {
+    console.log(c.success(`All ${allKeys.size} keys are in sync`))
+    return
+  }
+
+  console.log(`\n${c.warn(`${rows.length} keys out of sync`)}\n`)
+  printTable(columns, rows)
+  console.log()
 }
 
-async function getConvexEnv(env: 'dev' | 'prod'): Promise<Record<string, string>> {
-  const args = env === 'prod'
-    ? ['convex', 'env', 'list', '--prod']
-    : ['convex', 'env', 'list']
+function checkSyncStatus(opts: {
+  envVal: string | undefined
+  convexVal: string | undefined
+  wranglerExists: boolean | undefined
+  hasConvex: boolean
+  hasWrangler: boolean
+}): { synced: boolean; issues: string[] } {
+  const { envVal, convexVal, wranglerExists, hasConvex, hasWrangler } = opts
+  const issues: string[] = []
+
+  // .env 中没有，但其他地方有
+  if (envVal === undefined) {
+    if (hasConvex && convexVal !== undefined) {
+      issues.push('removed locally')
+    }
+    if (hasWrangler && wranglerExists) {
+      issues.push('removed locally')
+    }
+    return { synced: issues.length === 0, issues: [...new Set(issues)] }
+  }
+
+  // .env 中有，检查其他地方
+  if (hasConvex && convexVal !== envVal) {
+    if (convexVal === undefined) {
+      issues.push('missing in convex')
+    } else {
+      issues.push('convex differs')
+    }
+  }
+
+  if (hasWrangler && !wranglerExists) {
+    issues.push('missing in wrangler')
+  }
+
+  return { synced: issues.length === 0, issues }
+}
+
+function formatValue(val: string | undefined): string {
+  if (val === undefined) return c.dim('─')
+  if (val.length <= 16) return val
+  return `${val.slice(0, 6)}...${val.slice(-6)}`
+}
+
+async function getConvexEnv(env: EnvType): Promise<Record<string, string>> {
+  const args =
+    env === 'prod' ? ['convex', 'env', 'list', '--prod'] : ['convex', 'env', 'list']
 
   const result = Bun.spawnSync(args, { stdout: 'pipe', stderr: 'pipe' })
 
   if (result.exitCode !== 0) {
-    console.error('Failed to get Convex environment variables')
     return {}
   }
 
   const output = result.stdout.toString()
   const record: Record<string, string> = {}
 
-  // 解析 convex env list 输出 (格式: KEY=value)
   for (const line of output.split('\n')) {
     const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
-    if (match) {
-      record[match[1]] = match[2]
+    if (match?.[1]) {
+      record[match[1]] = match[2] ?? ''
     }
   }
 
   return record
 }
 
-function computeDiff(
-  left: Record<string, string>,
-  right: Record<string, string>,
-  excludePatterns: string[]
-): DiffEntry[] {
-  const allKeys = new Set([...Object.keys(left), ...Object.keys(right)])
-  const entries: DiffEntry[] = []
+async function getWranglerSecretsForDiff(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  env: EnvType
+): Promise<Set<string>> {
+  const wranglerConfig = config.sync?.wrangler
+  if (!wranglerConfig) return new Set()
 
-  for (const key of allKeys) {
-    // 跳过内置忽略和自定义排除
-    if (shouldExclude(key, excludePatterns)) continue
+  const configPath = wranglerConfig.config ?? './wrangler.jsonc'
+  const wranglerDir = dirname(resolve(configPath))
 
-    const leftVal = left[key] ?? null
-    const rightVal = right[key] ?? null
-
-    let status: DiffEntry['status']
-    if (leftVal === null) {
-      status = 'added'
-    } else if (rightVal === null) {
-      status = 'removed'
-    } else if (leftVal === rightVal) {
-      status = 'same'
-    } else {
-      status = 'changed'
-    }
-
-    // 只显示有差异的
-    if (status !== 'same') {
-      entries.push({ key, left: leftVal, right: rightVal, status })
-    }
-  }
-
-  return entries.sort((a, b) => a.key.localeCompare(b.key))
-}
-
-function printDiff(entries: DiffEntry[], leftLabel: string, rightLabel: string, tool?: string) {
-  if (entries.length === 0) {
-    console.log('\n✓ No differences\n')
-    return
-  }
-
-  if (tool) {
-    // 使用外部工具
-    printWithExternalTool(entries, leftLabel, rightLabel, tool)
-    return
-  }
-
-  console.log(`\nDiff: ${leftLabel} ↔ ${rightLabel} (${entries.length} differences)\n`)
-
-  const data = entries.map(e => ({
-    key: e.key,
-    status: e.status === 'added' ? '+ added' : e.status === 'removed' ? '- removed' : '~ changed',
-    [leftLabel]: truncate(e.left ?? '(not set)', 30),
-    [rightLabel]: truncate(e.right ?? '(not set)', 30),
-  }))
-
-  console.table(data)
-}
-
-function printWithExternalTool(entries: DiffEntry[], leftLabel: string, rightLabel: string, tool: string) {
-  // 创建临时文件
-  const leftContent = entries.map(e => `${e.key}=${e.left ?? ''}`).join('\n')
-  const rightContent = entries.map(e => `${e.key}=${e.right ?? ''}`).join('\n')
-
-  const leftFile = `/tmp/env-diff-${leftLabel}.env`
-  const rightFile = `/tmp/env-diff-${rightLabel}.env`
-
-  Bun.spawnSync(['bash', '-c', `echo '${leftContent}' > ${leftFile}`])
-  Bun.spawnSync(['bash', '-c', `echo '${rightContent}' > ${rightFile}`])
-
-  Bun.spawnSync([tool, leftFile, rightFile], { stdio: ['inherit', 'inherit', 'inherit'] })
-}
-
-function truncate(str: string, maxLen: number): string {
-  if (str.length <= maxLen) return str
-  return str.slice(0, maxLen - 3) + '...'
+  return getWranglerSecrets(wranglerDir, wranglerConfig, env)
 }

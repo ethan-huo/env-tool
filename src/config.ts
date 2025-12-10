@@ -20,6 +20,12 @@ const convexSyncSchema = v.object({
 const wranglerSyncSchema = v.object({
   config: v.optional(v.string(), './wrangler.jsonc'),
   exclude: v.optional(v.array(v.string()), []),
+  // 环境映射: { dev: 'staging', prod: 'production' }
+  // 未配置则视为单环境 worker，不传 --env 参数
+  envMapping: v.optional(v.object({
+    dev: v.optional(v.string()),
+    prod: v.optional(v.string()),
+  })),
 })
 
 const syncSchema = v.object({

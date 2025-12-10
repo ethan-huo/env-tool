@@ -1,21 +1,37 @@
 import { dirname, resolve } from 'node:path'
-import type { SyncConfig } from '../config'
+import type { EnvType, SyncConfig } from '../config'
 import { shouldExclude } from './dotenv'
+
+type WranglerConfig = NonNullable<SyncConfig['wrangler']>
+
+/** 构建 wrangler 命令参数（处理 env mapping） */
+function buildWranglerArgs(
+  baseArgs: string[],
+  config: WranglerConfig,
+  env?: EnvType
+): string[] {
+  const wranglerEnv = env ? config.envMapping?.[env] : undefined
+  if (wranglerEnv) {
+    return [...baseArgs, '--env', wranglerEnv]
+  }
+  return baseArgs
+}
 
 /**
  * 同步环境变量到 Wrangler (Cloudflare Worker)
  */
 export async function syncToWrangler(
   envRecord: Record<string, string>,
-  config: SyncConfig['wrangler'],
+  env: EnvType,
+  config: WranglerConfig,
   dryRun = false
 ): Promise<{ added: string[]; updated: string[]; removed: string[] }> {
-  const excludePatterns = config?.exclude ?? []
-  const wranglerConfig = config?.config ?? './wrangler.jsonc'
+  const excludePatterns = config.exclude ?? []
+  const wranglerConfig = config.config ?? './wrangler.jsonc'
   const wranglerDir = dirname(resolve(wranglerConfig))
 
   // 获取当前 Wrangler secrets
-  const currentSecrets = await getWranglerSecrets(wranglerDir)
+  const currentSecrets = await getWranglerSecrets(wranglerDir, config, env)
 
   // 计算需要同步的变量（排除 VITE_* 等公开变量）
   const toSync: Record<string, string> = {}
@@ -49,23 +65,33 @@ export async function syncToWrangler(
 
   if (!dryRun && (added.length > 0 || updated.length > 0)) {
     // 使用 bulk 命令批量上传
-    await bulkUploadSecrets(toSync, wranglerDir)
+    await bulkUploadSecrets(toSync, wranglerDir, config, env)
   }
 
   if (!dryRun) {
     for (const key of removed) {
-      await deleteWranglerSecret(key, wranglerDir)
+      await deleteWranglerSecret(key, wranglerDir, config, env)
     }
   }
 
   return { added, updated, removed }
 }
 
-async function getWranglerSecrets(cwd: string): Promise<Set<string>> {
-  const result = Bun.spawnSync(
-    ['bunx', 'wrangler', 'secret', 'list', '--format', 'json'],
-    { stdout: 'pipe', stderr: 'pipe', cwd }
-  )
+export async function getWranglerSecrets(
+  cwd: string,
+  config?: WranglerConfig,
+  env?: EnvType
+): Promise<Set<string>> {
+  const baseArgs = ['wrangler', 'secret', 'list', '--format', 'json']
+  const args = config
+    ? buildWranglerArgs(baseArgs, config, env)
+    : baseArgs
+
+  const result = Bun.spawnSync(['bunx', ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    cwd,
+  })
 
   if (result.exitCode !== 0) {
     return new Set()
@@ -74,7 +100,7 @@ async function getWranglerSecrets(cwd: string): Promise<Set<string>> {
   try {
     const output = result.stdout.toString()
     const secrets = JSON.parse(output) as Array<{ name: string }>
-    return new Set(secrets.map(s => s.name))
+    return new Set(secrets.map((s) => s.name))
   } catch {
     return new Set()
   }
@@ -82,17 +108,23 @@ async function getWranglerSecrets(cwd: string): Promise<Set<string>> {
 
 async function bulkUploadSecrets(
   secrets: Record<string, string>,
-  cwd: string
+  cwd: string,
+  config: WranglerConfig,
+  env: EnvType
 ): Promise<void> {
   // 写入临时 JSON 文件
   const tempFile = `/tmp/env-tool-secrets-${Date.now()}.json`
   await Bun.write(tempFile, JSON.stringify(secrets))
 
   try {
-    const result = Bun.spawnSync(
-      ['bunx', 'wrangler', 'secret', 'bulk', tempFile],
-      { stdout: 'pipe', stderr: 'pipe', cwd }
-    )
+    const baseArgs = ['wrangler', 'secret', 'bulk', tempFile]
+    const args = buildWranglerArgs(baseArgs, config, env)
+
+    const result = Bun.spawnSync(['bunx', ...args], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd,
+    })
 
     if (result.exitCode !== 0) {
       const stderr = result.stderr.toString()
@@ -100,13 +132,23 @@ async function bulkUploadSecrets(
     }
   } finally {
     // 清理临时文件
-    await Bun.file(tempFile).exists() && Bun.spawnSync(['rm', tempFile])
+    const exists = await Bun.file(tempFile).exists()
+    if (exists) Bun.spawnSync(['rm', tempFile])
   }
 }
 
-async function deleteWranglerSecret(key: string, cwd: string): Promise<void> {
-  Bun.spawnSync(
-    ['bunx', 'wrangler', 'secret', 'delete', key, '--force'],
-    { stdout: 'pipe', stderr: 'pipe', cwd }
-  )
+async function deleteWranglerSecret(
+  key: string,
+  cwd: string,
+  config: WranglerConfig,
+  env: EnvType
+): Promise<void> {
+  const baseArgs = ['wrangler', 'secret', 'delete', key, '--force']
+  const args = buildWranglerArgs(baseArgs, config, env)
+
+  Bun.spawnSync(['bunx', ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    cwd,
+  })
 }
