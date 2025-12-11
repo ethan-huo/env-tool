@@ -33,11 +33,11 @@ export const getCommand = new Command('get')
       }))
       console.table(data)
     } else {
-      const result = results[0]
-      if (result.value === null) {
+      const value = results[0]?.value
+      if (value === null || value === undefined) {
         console.error(`Variable ${key} is not set`)
         process.exit(1)
       }
-      console.log(result.value)
+      console.log(value)
     }
   })

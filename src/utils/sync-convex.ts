@@ -74,8 +74,8 @@ async function getConvexEnv(env: 'dev' | 'prod'): Promise<Record<string, string>
 
   for (const line of output.split('\n')) {
     const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
-    if (match) {
-      record[match[1]] = match[2]
+    if (match?.[1]) {
+      record[match[1]] = match[2] ?? ''
     }
   }
 

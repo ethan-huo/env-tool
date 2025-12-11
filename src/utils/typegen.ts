@@ -53,6 +53,8 @@ function generateValibotTypes(publicVars: EnvVar[], privateVars: EnvVar[]): stri
   lines.push('export type PrivateEnv = v.InferOutput<typeof privateEnvSchema>')
   lines.push('')
 
+  lines.push(...generateEnvDtsHint())
+
   return lines.join('\n')
 }
 
@@ -85,6 +87,8 @@ function generateZodTypes(publicVars: EnvVar[], privateVars: EnvVar[]): string {
   lines.push('export type PrivateEnv = z.infer<typeof privateEnvSchema>')
   lines.push('')
 
+  lines.push(...generateEnvDtsHint())
+
   return lines.join('\n')
 }
 
@@ -105,7 +109,25 @@ function generatePlainTypes(publicVars: EnvVar[], privateVars: EnvVar[]): string
   lines.push('}')
   lines.push('')
 
+  lines.push(...generateEnvDtsHint())
+
   return lines.join('\n')
+}
+
+function generateEnvDtsHint(): string[] {
+  return [
+    '// env.d.ts',
+    '// import type { PrivateEnv, PublicEnv } from "@/lib/env"',
+    '// declare global {',
+    '//',
+    '//   namespace NodeJS {',
+    '//     interface ProcessEnv extends PrivateEnv {}',
+    '//   }',
+    '//',
+    '//   interface ImportMetaEnv extends PublicEnv {}',
+    '// }',
+    '',
+  ]
 }
 
 function inferValidator(key: string, value: string, lib: 'valibot' | 'zod'): string {
